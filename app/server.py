@@ -51,6 +51,9 @@ class APIServer:
                     raise ValueError(f"missing query parameter: {name}")
                 return value
 
+            def _validate_iso(self, value: str) -> None:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+
             def do_GET(self):
                 parsed = urlparse(self.path)
                 query = parse_qs(parsed.query)
@@ -79,8 +82,8 @@ class APIServer:
                         metric = self._require(query, "metric")
                         start = self._require(query, "start")
                         end = self._require(query, "end")
-                        datetime.fromisoformat(start)
-                        datetime.fromisoformat(end)
+                        self._validate_iso(start)
+                        self._validate_iso(end)
                     except ValueError as exc:
                         self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                         return
@@ -92,7 +95,7 @@ class APIServer:
                         source = self._require(query, "source")
                         metric = self._require(query, "metric")
                         since = self._require(query, "since")
-                        datetime.fromisoformat(since)
+                        self._validate_iso(since)
                     except ValueError as exc:
                         self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                         return
