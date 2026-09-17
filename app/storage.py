@@ -165,6 +165,7 @@ class TemporalStore:
                 """
                 DELETE FROM metric_points
                 WHERE event_timestamp < ?
+                  AND event_timestamp < ?
                   AND EXISTS (
                       SELECT 1
                       FROM metric_rollups_hourly r
@@ -173,7 +174,7 @@ class TemporalStore:
                         AND r.bucket_start = substr(metric_points.event_timestamp, 1, 13) || ':00:00+00:00'
                   )
                 """,
-                (delete_cutoff,),
+                (delete_cutoff, rollup_cutoff),
             )
 
     def query_latest(self, source: str, metric: str) -> dict | None:
@@ -225,7 +226,29 @@ class TemporalStore:
                 """,
                 (source, metric, normalized_start, normalized_end),
             ).fetchall()
-            return [dict(r) for r in rows]
+            if rows:
+                return [dict(r) for r in rows]
+            rollup_rows = conn.execute(
+                """
+                SELECT source, metric, avg_value, bucket_start
+                FROM metric_rollups_hourly
+                WHERE source = ? AND metric = ? AND bucket_start BETWEEN ? AND ?
+                ORDER BY bucket_start ASC
+                """,
+                (source, metric, normalized_start, normalized_end),
+            ).fetchall()
+            return [
+                {
+                    "source": r["source"],
+                    "metric": r["metric"],
+                    "value": r["avg_value"],
+                    "unit": None,
+                    "event_timestamp": r["bucket_start"],
+                    "ingest_timestamp": None,
+                    "source_version": "rollup",
+                }
+                for r in rollup_rows
+            ]
 
     def query_delta(self, source: str, metric: str, since: str) -> dict:
         normalized_since = self._normalize_iso_utc(since)
@@ -261,7 +284,19 @@ class TemporalStore:
             ).fetchone()
             samples = int(row["samples"]) if row else 0
             if samples < 2 or row["first_value"] is None or row["last_value"] is None:
-                return {"delta": None, "samples": samples}
+                rollup_rows = conn.execute(
+                    """
+                    SELECT avg_value
+                    FROM metric_rollups_hourly
+                    WHERE source = ? AND metric = ? AND bucket_start >= ?
+                    ORDER BY bucket_start ASC
+                    """,
+                    (source, metric, normalized_since),
+                ).fetchall()
+                rollup_values = [r["avg_value"] for r in rollup_rows]
+                if len(rollup_values) < 2:
+                    return {"delta": None, "samples": max(samples, len(rollup_values))}
+                return {"delta": rollup_values[-1] - rollup_values[0], "samples": len(rollup_values)}
             return {"delta": row["last_value"] - row["first_value"], "samples": samples}
 
     def query_freshness(self, source: str, freshness_target_seconds: int, now: datetime | None = None) -> dict:
@@ -325,6 +360,14 @@ class TemporalStore:
                     }
                 )
             return health
+
+    def is_ready(self) -> bool:
+        try:
+            with self._conn() as conn:
+                conn.execute("SELECT 1").fetchone()
+            return True
+        except sqlite3.Error:
+            return False
 
     @staticmethod
     def _normalize_iso_utc(value: str) -> str:

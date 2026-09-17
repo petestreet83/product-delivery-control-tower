@@ -117,7 +117,10 @@ class APIServer:
                     return
 
                 if parsed.path == "/readyz":
-                    self._send_json(HTTPStatus.OK, {"status": "ok"})
+                    if store.is_ready():
+                        self._send_json(HTTPStatus.OK, {"status": "ok"})
+                    else:
+                        self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"status": "unavailable"})
                     return
 
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
