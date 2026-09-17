@@ -10,6 +10,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError
 
 from app.connectors import NormalizedMetric, OpenMeteoConnector, RateLimitError, SchemaValidationError
 from app.contract import RetentionPolicy, TemporalUpdateContract
@@ -96,6 +97,42 @@ class TemporalPipelineTests(unittest.TestCase):
     def test_store_rejects_invalid_retention_policy(self):
         with self.assertRaises(ValueError):
             TemporalStore(self.db_path, retention_policy=RetentionPolicy(rollup_after_days=30, raw_retention_days=7))
+
+    def test_rollup_and_retention_only_delete_rolled_data(self):
+        policy = RetentionPolicy(rollup_after_days=1, raw_retention_days=2)
+        store = TemporalStore(self.db_path, retention_policy=policy)
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(days=3)).isoformat()
+        recent_ts = (now - timedelta(hours=12)).isoformat()
+        store.insert_points(
+            [
+                NormalizedMetric(
+                    source="open-meteo",
+                    metric="temperature_2m",
+                    value=20.0,
+                    unit="celsius",
+                    event_timestamp=old_ts,
+                    ingest_timestamp=old_ts,
+                    source_version="v1",
+                ),
+                NormalizedMetric(
+                    source="open-meteo",
+                    metric="temperature_2m",
+                    value=22.0,
+                    unit="celsius",
+                    event_timestamp=recent_ts,
+                    ingest_timestamp=recent_ts,
+                    source_version="v1",
+                ),
+            ]
+        )
+        store.apply_rollup_and_retention(now=now)
+
+        with sqlite3.connect(self.db_path) as conn:
+            raw_count = conn.execute("SELECT COUNT(*) FROM metric_points").fetchone()[0]
+            rollup_count = conn.execute("SELECT COUNT(*) FROM metric_rollups_hourly").fetchone()[0]
+        self.assertEqual(1, raw_count)
+        self.assertEqual(1, rollup_count)
 
     def test_orchestrator_retries_and_dead_letters_on_rate_limit(self):
         store = TemporalStore(self.db_path)
@@ -234,6 +271,7 @@ class TemporalPipelineTests(unittest.TestCase):
             store=store,
             orchestrator=orchestrator,
             contract=TemporalUpdateContract(),
+            trigger_token="secret-token",
         )
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), api.create_handler())
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -243,10 +281,20 @@ class TemporalPipelineTests(unittest.TestCase):
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/connectors/fake-source/trigger",
                 method="POST",
+                headers={"X-Trigger-Token": "secret-token"},
             )
             with urllib.request.urlopen(req, timeout=5) as response:
                 trigger_payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual("success", trigger_payload["status"])
+
+            bad_token_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/connectors/fake-source/trigger",
+                method="POST",
+                headers={"X-Trigger-Token": "wrong-token"},
+            )
+            with self.assertRaises(HTTPError) as bad_token_error:
+                urllib.request.urlopen(bad_token_req, timeout=5)
+            self.assertEqual(401, bad_token_error.exception.code)
 
             bad_req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/metrics/latest?source=open-meteo",

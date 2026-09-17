@@ -71,6 +71,12 @@ class TemporalStore:
                     failed_at TEXT NOT NULL,
                     error_message TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_metric_points_source_metric_time
+                    ON metric_points (source, metric, event_timestamp);
+                CREATE INDEX IF NOT EXISTS idx_metric_points_source_time
+                    ON metric_points (source, event_timestamp);
+                CREATE INDEX IF NOT EXISTS idx_connector_runs_source_status_finished
+                    ON connector_runs (source, status, finished_at);
                 """
             )
 
@@ -149,7 +155,20 @@ class TemporalStore:
                 """,
                 (now.isoformat(), rollup_cutoff),
             )
-            conn.execute("DELETE FROM metric_points WHERE event_timestamp < ?", (delete_cutoff,))
+            conn.execute(
+                """
+                DELETE FROM metric_points
+                WHERE event_timestamp < ?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM metric_rollups_hourly r
+                      WHERE r.source = metric_points.source
+                        AND r.metric = metric_points.metric
+                        AND r.bucket_start = substr(metric_points.event_timestamp, 1, 13) || ':00:00+00:00'
+                  )
+                """,
+                (delete_cutoff,),
+            )
 
     def query_latest(self, source: str, metric: str) -> dict | None:
         with self._conn() as conn:
@@ -180,19 +199,29 @@ class TemporalStore:
 
     def query_delta(self, source: str, metric: str, since: str) -> dict:
         with self._conn() as conn:
-            rows = conn.execute(
+            row = conn.execute(
                 """
-                SELECT value
+                SELECT
+                    (SELECT value
+                     FROM metric_points
+                     WHERE source = ? AND metric = ? AND event_timestamp >= ?
+                     ORDER BY event_timestamp ASC
+                     LIMIT 1) AS first_value,
+                    (SELECT value
+                     FROM metric_points
+                     WHERE source = ? AND metric = ? AND event_timestamp >= ?
+                     ORDER BY event_timestamp DESC
+                     LIMIT 1) AS last_value,
+                    COUNT(*) AS samples
                 FROM metric_points
                 WHERE source = ? AND metric = ? AND event_timestamp >= ?
-                ORDER BY event_timestamp ASC
                 """,
-                (source, metric, since),
-            ).fetchall()
-            values = [r["value"] for r in rows]
-            if len(values) < 2:
-                return {"delta": None, "samples": len(values)}
-            return {"delta": values[-1] - values[0], "samples": len(values)}
+                (source, metric, since, source, metric, since, source, metric, since),
+            ).fetchone()
+            samples = int(row["samples"]) if row else 0
+            if samples < 2 or row["first_value"] is None or row["last_value"] is None:
+                return {"delta": None, "samples": samples}
+            return {"delta": row["last_value"] - row["first_value"], "samples": samples}
 
     def query_freshness(self, source: str, freshness_target_seconds: int, now: datetime | None = None) -> dict:
         now = now or datetime.now(timezone.utc)

@@ -13,17 +13,27 @@ from .storage import TemporalStore
 
 
 class APIServer:
-    def __init__(self, host: str, port: int, store: TemporalStore, orchestrator: UpdateOrchestrator, contract: TemporalUpdateContract):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        store: TemporalStore,
+        orchestrator: UpdateOrchestrator,
+        contract: TemporalUpdateContract,
+        trigger_token: str | None = None,
+    ):
         self.host = host
         self.port = port
         self.store = store
         self.orchestrator = orchestrator
         self.contract = contract
+        self.trigger_token = trigger_token
 
     def create_handler(self):
         store = self.store
         orchestrator = self.orchestrator
         contract = self.contract
+        trigger_token = self.trigger_token
 
         class Handler(BaseHTTPRequestHandler):
             def _send_json(self, status: int, body: dict | list):
@@ -113,6 +123,12 @@ class APIServer:
                 parts = [segment for segment in parsed.path.split("/") if segment]
                 if len(parts) != 3 or parts[0] != "connectors" or parts[2] != "trigger":
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                if trigger_token is None:
+                    self._send_json(HTTPStatus.FORBIDDEN, {"error": "manual trigger is disabled"})
+                    return
+                if self.headers.get("X-Trigger-Token") != trigger_token:
+                    self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid trigger token"})
                     return
                 source_name = parts[1]
                 if source_name not in orchestrator.connectors:

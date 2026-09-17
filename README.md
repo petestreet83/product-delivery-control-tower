@@ -21,7 +21,7 @@ Temporal public-data connector service for a delivery control tower. It ingests 
 ## Run
 
 ```bash
-python -m app.main --db-path /tmp/control_tower.db --cadence-seconds 60
+python -m app.main --db-path /tmp/control_tower.db --cadence-seconds 60 --trigger-token your-token
 ```
 
 Optional connector location override:
@@ -51,7 +51,7 @@ Returns staleness and freshness status.
 Returns connector success/failure rate and latency indicators.
 
 ### `POST /connectors/<source>/trigger`
-Manual/webhook trigger for a connector run.
+Manual/webhook trigger for a connector run. Requires header `X-Trigger-Token: <token>` and only works when `--trigger-token` is configured.
 
 ### `GET /readyz`
 Simple readiness endpoint.
