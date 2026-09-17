@@ -36,7 +36,7 @@ python -m app.main --latitude 37.7749 --longitude -122.4194
 Returns active temporal contract values.
 
 ### `GET /metrics/latest?source=<source>&metric=<metric>`
-Returns latest point for a metric.
+Returns latest point for a metric; if raw points were compacted, it falls back to the latest hourly rollup bucket.
 
 ### `GET /metrics/history?source=<source>&metric=<metric>&start=<iso>&end=<iso>`
 Returns time-window history.

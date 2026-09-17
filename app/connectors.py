@@ -119,7 +119,8 @@ class OpenMeteoConnector(PublicAPIConnector):
     def _to_iso(raw_event_time: str) -> str:
         normalized = raw_event_time.replace("Z", "+00:00")
         if "T" not in normalized:
-            normalized = normalized + "T00:00:00+00:00"
-        if "+" not in normalized and not normalized.endswith("Z"):
-            normalized = normalized + "+00:00"
-        return datetime.fromisoformat(normalized).astimezone(timezone.utc).isoformat()
+            normalized = normalized + "T00:00:00"
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()

@@ -73,6 +73,35 @@ class TemporalPipelineTests(unittest.TestCase):
         with self.assertRaises(SchemaValidationError):
             connector.fetch_metrics()
 
+    def test_connector_normalizes_z_and_offset_timestamps(self):
+        connector_z = OpenMeteoConnector(
+            latitude=1.0,
+            longitude=2.0,
+            url_fetcher=lambda _url, _timeout: {
+                "current": {
+                    "time": "2026-01-01T12:00:00Z",
+                    "temperature_2m": 10.0,
+                    "relative_humidity_2m": 50,
+                }
+            },
+        )
+        z_metrics = connector_z.fetch_metrics()
+        self.assertEqual("2026-01-01T12:00:00+00:00", z_metrics[0].event_timestamp)
+
+        connector_offset = OpenMeteoConnector(
+            latitude=1.0,
+            longitude=2.0,
+            url_fetcher=lambda _url, _timeout: {
+                "current": {
+                    "time": "2026-01-01T07:00:00-05:00",
+                    "temperature_2m": 10.0,
+                    "relative_humidity_2m": 50,
+                }
+            },
+        )
+        offset_metrics = connector_offset.fetch_metrics()
+        self.assertEqual("2026-01-01T12:00:00+00:00", offset_metrics[0].event_timestamp)
+
     def test_store_insert_is_idempotent(self):
         connector = OpenMeteoConnector(
             latitude=1.0,
@@ -195,6 +224,28 @@ class TemporalPipelineTests(unittest.TestCase):
 
         freshness = store.query_freshness("open-meteo", freshness_target_seconds=999999, now=now)
         self.assertIsNotNone(freshness["latest_event_timestamp"])
+
+    def test_latest_falls_back_to_rollups(self):
+        policy = RetentionPolicy(rollup_after_days=1, raw_retention_days=2)
+        store = TemporalStore(self.db_path, retention_policy=policy)
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(days=3)).isoformat()
+        store.insert_points(
+            [
+                NormalizedMetric(
+                    source="open-meteo",
+                    metric="temperature_2m",
+                    value=20.0,
+                    unit="celsius",
+                    event_timestamp=old_ts,
+                    ingest_timestamp=old_ts,
+                    source_version="v1",
+                )
+            ]
+        )
+        store.apply_rollup_and_retention(now=now)
+        latest = store.query_latest("open-meteo", "temperature_2m")
+        self.assertEqual("rollup", latest["source_version"])
 
     def test_orchestrator_retries_and_dead_letters_on_rate_limit(self):
         store = TemporalStore(self.db_path)

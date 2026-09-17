@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 from dataclasses import asdict
 from datetime import datetime
@@ -127,7 +128,8 @@ class APIServer:
                 if trigger_token is None:
                     self._send_json(HTTPStatus.FORBIDDEN, {"error": "manual trigger is disabled"})
                     return
-                if self.headers.get("X-Trigger-Token") != trigger_token:
+                received_token = self.headers.get("X-Trigger-Token", "")
+                if not hmac.compare_digest(received_token, trigger_token):
                     self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid trigger token"})
                     return
                 source_name = parts[1]

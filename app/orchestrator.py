@@ -50,6 +50,12 @@ class UpdateOrchestrator:
                         self.store.record_run_finished(run_id, "failed", finished.isoformat(), latency_ms, 0, "run interrupted")
                         self.store.record_dead_letter(source_name, trigger_type, finished.isoformat(), "run interrupted")
                         return {"source": source_name, "status": "failed", "error": "run interrupted"}
+                except Exception as exc:  # pragma: no cover - defensive failure path
+                    finished = datetime.now(timezone.utc)
+                    latency_ms = int((finished - started).total_seconds() * 1000)
+                    self.store.record_run_finished(run_id, "failed", finished.isoformat(), latency_ms, 0, str(exc))
+                    self.store.record_dead_letter(source_name, trigger_type, finished.isoformat(), str(exc))
+                    return {"source": source_name, "status": "failed", "error": str(exc)}
 
     def run_all_once(self, trigger_type: str = "schedule") -> list[dict]:
         return [self.run_connector_once(name, trigger_type=trigger_type) for name in self.connectors]

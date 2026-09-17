@@ -138,7 +138,7 @@ class TemporalStore:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO metric_rollups_hourly
+                INSERT INTO metric_rollups_hourly
                 (source, metric, bucket_start, avg_value, min_value, max_value, sample_count, created_at)
                 SELECT
                     source,
@@ -152,6 +152,12 @@ class TemporalStore:
                 FROM metric_points
                 WHERE event_timestamp < ?
                 GROUP BY source, metric, substr(event_timestamp, 1, 13)
+                ON CONFLICT(source, metric, bucket_start) DO UPDATE SET
+                    avg_value = excluded.avg_value,
+                    min_value = excluded.min_value,
+                    max_value = excluded.max_value,
+                    sample_count = excluded.sample_count,
+                    created_at = excluded.created_at
                 """,
                 (now.isoformat(), rollup_cutoff),
             )
@@ -182,7 +188,29 @@ class TemporalStore:
                 """,
                 (source, metric),
             ).fetchone()
-            return dict(row) if row else None
+            if row:
+                return dict(row)
+            rollup_row = conn.execute(
+                """
+                SELECT source, metric, avg_value, bucket_start
+                FROM metric_rollups_hourly
+                WHERE source = ? AND metric = ?
+                ORDER BY bucket_start DESC
+                LIMIT 1
+                """,
+                (source, metric),
+            ).fetchone()
+            if not rollup_row:
+                return None
+            return {
+                "source": rollup_row["source"],
+                "metric": rollup_row["metric"],
+                "value": rollup_row["avg_value"],
+                "unit": None,
+                "event_timestamp": rollup_row["bucket_start"],
+                "ingest_timestamp": None,
+                "source_version": "rollup",
+            }
 
     def query_history(self, source: str, metric: str, start: str, end: str) -> list[dict]:
         normalized_start = self._normalize_iso_utc(start)
@@ -300,4 +328,7 @@ class TemporalStore:
 
     @staticmethod
     def _normalize_iso_utc(value: str) -> str:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
