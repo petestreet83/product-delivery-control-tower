@@ -18,6 +18,8 @@ class UpdateOrchestrator:
         self._thread: threading.Thread | None = None
 
     def run_connector_once(self, source_name: str, trigger_type: str = "manual") -> dict:
+        if source_name not in self.connectors:
+            return {"source": source_name, "status": "failed", "error": "unknown connector"}
         connector = self.connectors[source_name]
         with self._connector_locks[source_name]:
             started = datetime.now(timezone.utc)

@@ -185,6 +185,8 @@ class TemporalStore:
             return dict(row) if row else None
 
     def query_history(self, source: str, metric: str, start: str, end: str) -> list[dict]:
+        normalized_start = self._normalize_iso_utc(start)
+        normalized_end = self._normalize_iso_utc(end)
         with self._conn() as conn:
             rows = conn.execute(
                 """
@@ -193,11 +195,12 @@ class TemporalStore:
                 WHERE source = ? AND metric = ? AND event_timestamp BETWEEN ? AND ?
                 ORDER BY event_timestamp ASC
                 """,
-                (source, metric, start, end),
+                (source, metric, normalized_start, normalized_end),
             ).fetchall()
             return [dict(r) for r in rows]
 
     def query_delta(self, source: str, metric: str, since: str) -> dict:
+        normalized_since = self._normalize_iso_utc(since)
         with self._conn() as conn:
             row = conn.execute(
                 """
@@ -216,7 +219,17 @@ class TemporalStore:
                 FROM metric_points
                 WHERE source = ? AND metric = ? AND event_timestamp >= ?
                 """,
-                (source, metric, since, source, metric, since, source, metric, since),
+                (
+                    source,
+                    metric,
+                    normalized_since,
+                    source,
+                    metric,
+                    normalized_since,
+                    source,
+                    metric,
+                    normalized_since,
+                ),
             ).fetchone()
             samples = int(row["samples"]) if row else 0
             if samples < 2 or row["first_value"] is None or row["last_value"] is None:
@@ -231,6 +244,12 @@ class TemporalStore:
                 (source,),
             ).fetchone()
             latest_ts = row["latest_ts"] if row else None
+            if latest_ts is None:
+                rollup_row = conn.execute(
+                    "SELECT MAX(bucket_start) AS latest_bucket FROM metric_rollups_hourly WHERE source = ?",
+                    (source,),
+                ).fetchone()
+                latest_ts = rollup_row["latest_bucket"] if rollup_row else None
             if latest_ts is None:
                 return {"source": source, "staleness_seconds": None, "within_target": False}
             latest = datetime.fromisoformat(latest_ts)
