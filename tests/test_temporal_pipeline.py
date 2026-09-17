@@ -5,7 +5,9 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -149,6 +151,8 @@ class TemporalPipelineTests(unittest.TestCase):
             connectors=[FakeTriggerConnector()],
             contract=TemporalUpdateContract(cadence_seconds=300),
         )
+        past_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        future_ts = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         store.insert_points(
             [
                 NormalizedMetric(
@@ -156,8 +160,8 @@ class TemporalPipelineTests(unittest.TestCase):
                     metric="temperature_2m",
                     value=20.0,
                     unit="celsius",
-                    event_timestamp="2026-01-01T12:00:00+00:00",
-                    ingest_timestamp="2026-01-01T12:00:02+00:00",
+                    event_timestamp=past_ts,
+                    ingest_timestamp=past_ts,
                     source_version="v1",
                 ),
                 NormalizedMetric(
@@ -165,8 +169,8 @@ class TemporalPipelineTests(unittest.TestCase):
                     metric="temperature_2m",
                     value=24.0,
                     unit="celsius",
-                    event_timestamp="2026-01-01T13:00:00+00:00",
-                    ingest_timestamp="2026-01-01T13:00:02+00:00",
+                    event_timestamp=future_ts,
+                    ingest_timestamp=future_ts,
                     source_version="v1",
                 ),
             ]
@@ -184,15 +188,18 @@ class TemporalPipelineTests(unittest.TestCase):
         thread.start()
         try:
             port = httpd.server_address[1]
+            start = urllib.parse.quote((datetime.now(timezone.utc) - timedelta(days=1)).isoformat())
+            end = urllib.parse.quote((datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
+            since = urllib.parse.quote((datetime.now(timezone.utc) - timedelta(days=1)).isoformat())
             with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/metrics/history?source=open-meteo&metric=temperature_2m&start=2026-01-01T11:00:00%2B00:00&end=2026-01-01T14:00:00%2B00:00",
+                f"http://127.0.0.1:{port}/metrics/history?source=open-meteo&metric=temperature_2m&start={start}&end={end}",
                 timeout=5,
             ) as response:
                 history_payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(2, len(history_payload))
 
             with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/metrics/delta?source=open-meteo&metric=temperature_2m&since=2026-01-01T11:00:00%2B00:00",
+                f"http://127.0.0.1:{port}/metrics/delta?source=open-meteo&metric=temperature_2m&since={since}",
                 timeout=5,
             ) as response:
                 delta_payload = json.loads(response.read().decode("utf-8"))
@@ -203,7 +210,8 @@ class TemporalPipelineTests(unittest.TestCase):
                 timeout=5,
             ) as response:
                 freshness_payload = json.loads(response.read().decode("utf-8"))
-            self.assertIn("within_target", freshness_payload)
+            self.assertEqual(0, freshness_payload["staleness_seconds"])
+            self.assertTrue(freshness_payload["within_target"])
         finally:
             httpd.shutdown()
             httpd.server_close()

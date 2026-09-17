@@ -69,3 +69,9 @@ Tests cover:
 - Retry + dead-letter behavior for rate limits
 - Idempotent temporal inserts
 - API query endpoint behavior
+
+
+## Runtime behavior
+
+`python -m app.main` starts both the scheduler thread and HTTP server in one process.
+Stop the service with `Ctrl+C` (or a `SIGTERM` from your process manager) to end the server loop and shut down the scheduler thread.

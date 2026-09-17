@@ -125,8 +125,9 @@ class TemporalStore:
     def apply_rollup_and_retention(self, now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)
         rollup_cutoff = (now - timedelta(days=self.retention_policy.rollup_after_days)).isoformat()
-        retention_cutoff = (now - timedelta(days=self.retention_policy.raw_retention_days)).isoformat()
-        delete_cutoff = min(rollup_cutoff, retention_cutoff)
+        delete_cutoff = (
+            now - timedelta(days=max(self.retention_policy.raw_retention_days, self.retention_policy.rollup_after_days))
+        ).isoformat()
 
         with self._conn() as conn:
             conn.execute(
@@ -204,7 +205,7 @@ class TemporalStore:
             if latest_ts is None:
                 return {"source": source, "staleness_seconds": None, "within_target": False}
             latest = datetime.fromisoformat(latest_ts)
-            staleness = int((now - latest).total_seconds())
+            staleness = max(0, int((now - latest).total_seconds()))
             return {
                 "source": source,
                 "latest_event_timestamp": latest_ts,
