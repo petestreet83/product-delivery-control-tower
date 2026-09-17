@@ -6,11 +6,10 @@ import tempfile
 import threading
 import unittest
 import urllib.request
-from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from app.connectors import OpenMeteoConnector, RateLimitError, SchemaValidationError
+from app.connectors import NormalizedMetric, OpenMeteoConnector, RateLimitError, SchemaValidationError
 from app.contract import TemporalUpdateContract
 from app.orchestrator import UpdateOrchestrator
 from app.server import APIServer
@@ -108,6 +107,144 @@ class TemporalPipelineTests(unittest.TestCase):
             run_status = conn.execute("SELECT status FROM connector_runs ORDER BY id DESC LIMIT 1").fetchone()[0]
         self.assertEqual(1, dead_letter_count)
         self.assertEqual("failed", run_status)
+
+    def test_server_contract_and_ready_and_health(self):
+        store = TemporalStore(self.db_path)
+        orchestrator = UpdateOrchestrator(
+            store=store,
+            connectors=[FakeTriggerConnector()],
+            contract=TemporalUpdateContract(cadence_seconds=42, freshness_target_seconds=99),
+        )
+        api = APIServer(
+            host="127.0.0.1",
+            port=0,
+            store=store,
+            orchestrator=orchestrator,
+            contract=TemporalUpdateContract(cadence_seconds=42, freshness_target_seconds=99),
+        )
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), api.create_handler())
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = httpd.server_address[1]
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/contract", timeout=5) as response:
+                contract_payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(42, contract_payload["cadence_seconds"])
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/readyz", timeout=5) as response:
+                ready_payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual("ok", ready_payload["status"])
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/connectors/health", timeout=5) as response:
+                health_payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual([], health_payload)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_server_history_delta_and_freshness_endpoints(self):
+        store = TemporalStore(self.db_path)
+        orchestrator = UpdateOrchestrator(
+            store=store,
+            connectors=[FakeTriggerConnector()],
+            contract=TemporalUpdateContract(cadence_seconds=300),
+        )
+        store.insert_points(
+            [
+                NormalizedMetric(
+                    source="open-meteo",
+                    metric="temperature_2m",
+                    value=20.0,
+                    unit="celsius",
+                    event_timestamp="2026-01-01T12:00:00+00:00",
+                    ingest_timestamp="2026-01-01T12:00:02+00:00",
+                    source_version="v1",
+                ),
+                NormalizedMetric(
+                    source="open-meteo",
+                    metric="temperature_2m",
+                    value=24.0,
+                    unit="celsius",
+                    event_timestamp="2026-01-01T13:00:00+00:00",
+                    ingest_timestamp="2026-01-01T13:00:02+00:00",
+                    source_version="v1",
+                ),
+            ]
+        )
+
+        api = APIServer(
+            host="127.0.0.1",
+            port=0,
+            store=store,
+            orchestrator=orchestrator,
+            contract=TemporalUpdateContract(freshness_target_seconds=10**9),
+        )
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), api.create_handler())
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = httpd.server_address[1]
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/metrics/history?source=open-meteo&metric=temperature_2m&start=2026-01-01T11:00:00%2B00:00&end=2026-01-01T14:00:00%2B00:00",
+                timeout=5,
+            ) as response:
+                history_payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(2, len(history_payload))
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/metrics/delta?source=open-meteo&metric=temperature_2m&since=2026-01-01T11:00:00%2B00:00",
+                timeout=5,
+            ) as response:
+                delta_payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(4.0, delta_payload["delta"])
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/metrics/freshness?source=open-meteo",
+                timeout=5,
+            ) as response:
+                freshness_payload = json.loads(response.read().decode("utf-8"))
+            self.assertIn("within_target", freshness_payload)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_server_post_trigger_and_validation(self):
+        store = TemporalStore(self.db_path)
+        orchestrator = UpdateOrchestrator(
+            store=store,
+            connectors=[FakeTriggerConnector()],
+            contract=TemporalUpdateContract(cadence_seconds=300),
+        )
+
+        api = APIServer(
+            host="127.0.0.1",
+            port=0,
+            store=store,
+            orchestrator=orchestrator,
+            contract=TemporalUpdateContract(),
+        )
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), api.create_handler())
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = httpd.server_address[1]
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/connectors/fake-source/trigger",
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                trigger_payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual("success", trigger_payload["status"])
+
+            bad_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/metrics/latest?source=open-meteo",
+                method="GET",
+            )
+            with self.assertRaisesRegex(Exception, "HTTP Error 400"):
+                urllib.request.urlopen(bad_req, timeout=5)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
     def test_server_latest_endpoint(self):
         store = TemporalStore(self.db_path)

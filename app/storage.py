@@ -126,6 +126,7 @@ class TemporalStore:
         now = now or datetime.now(timezone.utc)
         rollup_cutoff = (now - timedelta(days=self.retention_policy.rollup_after_days)).isoformat()
         retention_cutoff = (now - timedelta(days=self.retention_policy.raw_retention_days)).isoformat()
+        delete_cutoff = min(rollup_cutoff, retention_cutoff)
 
         with self._conn() as conn:
             conn.execute(
@@ -147,7 +148,7 @@ class TemporalStore:
                 """,
                 (now.isoformat(), rollup_cutoff),
             )
-            conn.execute("DELETE FROM metric_points WHERE event_timestamp < ?", (retention_cutoff,))
+            conn.execute("DELETE FROM metric_points WHERE event_timestamp < ?", (delete_cutoff,))
 
     def query_latest(self, source: str, metric: str) -> dict | None:
         with self._conn() as conn:

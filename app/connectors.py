@@ -107,7 +107,10 @@ class OpenMeteoConnector(PublicAPIConnector):
         if status >= 400:
             raise ConnectorError(f"upstream HTTP error: {status}")
 
-        data = json.loads(body)
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise SchemaValidationError("invalid JSON payload") from exc
         if not isinstance(data, dict):
             raise SchemaValidationError("invalid payload shape")
         return data
