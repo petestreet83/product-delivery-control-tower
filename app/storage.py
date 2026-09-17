@@ -12,6 +12,8 @@ class TemporalStore:
     def __init__(self, db_path: str, retention_policy: RetentionPolicy | None = None):
         self.db_path = db_path
         self.retention_policy = retention_policy or RetentionPolicy()
+        if self.retention_policy.raw_retention_days < self.retention_policy.rollup_after_days:
+            raise ValueError("raw_retention_days must be greater than or equal to rollup_after_days")
         self._init_db()
 
     @contextmanager
@@ -105,8 +107,8 @@ class TemporalStore:
                 m.metric,
                 m.value,
                 m.unit,
-                m.event_timestamp,
-                m.ingest_timestamp,
+                self._normalize_iso_utc(m.event_timestamp),
+                self._normalize_iso_utc(m.ingest_timestamp),
                 m.source_version,
             )
             for m in metrics
@@ -125,9 +127,7 @@ class TemporalStore:
     def apply_rollup_and_retention(self, now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)
         rollup_cutoff = (now - timedelta(days=self.retention_policy.rollup_after_days)).isoformat()
-        delete_cutoff = (
-            now - timedelta(days=max(self.retention_policy.raw_retention_days, self.retention_policy.rollup_after_days))
-        ).isoformat()
+        delete_cutoff = (now - timedelta(days=self.retention_policy.raw_retention_days)).isoformat()
 
         with self._conn() as conn:
             conn.execute(
@@ -249,3 +249,7 @@ class TemporalStore:
                     }
                 )
             return health
+
+    @staticmethod
+    def _normalize_iso_utc(value: str) -> str:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()

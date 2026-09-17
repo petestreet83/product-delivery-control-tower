@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from app.connectors import NormalizedMetric, OpenMeteoConnector, RateLimitError, SchemaValidationError
-from app.contract import TemporalUpdateContract
+from app.contract import RetentionPolicy, TemporalUpdateContract
 from app.orchestrator import UpdateOrchestrator
 from app.server import APIServer
 from app.storage import TemporalStore
@@ -92,6 +92,10 @@ class TemporalPipelineTests(unittest.TestCase):
 
         self.assertEqual(2, inserted_first)
         self.assertEqual(0, inserted_second)
+
+    def test_store_rejects_invalid_retention_policy(self):
+        with self.assertRaises(ValueError):
+            TemporalStore(self.db_path, retention_policy=RetentionPolicy(rollup_after_days=30, raw_retention_days=7))
 
     def test_orchestrator_retries_and_dead_letters_on_rate_limit(self):
         store = TemporalStore(self.db_path)
@@ -250,6 +254,58 @@ class TemporalPipelineTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(Exception, "HTTP Error 400"):
                 urllib.request.urlopen(bad_req, timeout=5)
+
+            malformed_trigger_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/connectors/fake-source/extra/trigger",
+                method="POST",
+            )
+            with self.assertRaisesRegex(Exception, "HTTP Error 404"):
+                urllib.request.urlopen(malformed_trigger_req, timeout=5)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_server_freshness_for_stale_data(self):
+        store = TemporalStore(self.db_path)
+        orchestrator = UpdateOrchestrator(
+            store=store,
+            connectors=[FakeTriggerConnector()],
+            contract=TemporalUpdateContract(cadence_seconds=300),
+        )
+        stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        store.insert_points(
+            [
+                NormalizedMetric(
+                    source="open-meteo",
+                    metric="temperature_2m",
+                    value=20.0,
+                    unit="celsius",
+                    event_timestamp=stale_ts,
+                    ingest_timestamp=stale_ts,
+                    source_version="v1",
+                )
+            ]
+        )
+
+        api = APIServer(
+            host="127.0.0.1",
+            port=0,
+            store=store,
+            orchestrator=orchestrator,
+            contract=TemporalUpdateContract(freshness_target_seconds=30),
+        )
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), api.create_handler())
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = httpd.server_address[1]
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/metrics/freshness?source=open-meteo",
+                timeout=5,
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertGreater(payload["staleness_seconds"], 0)
+            self.assertFalse(payload["within_target"])
         finally:
             httpd.shutdown()
             httpd.server_close()

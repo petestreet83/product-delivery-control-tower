@@ -110,10 +110,11 @@ class APIServer:
 
             def do_POST(self):
                 parsed = urlparse(self.path)
-                if not parsed.path.startswith("/connectors/") or not parsed.path.endswith("/trigger"):
+                parts = [segment for segment in parsed.path.split("/") if segment]
+                if len(parts) != 3 or parts[0] != "connectors" or parts[2] != "trigger":
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
-                source_name = parsed.path.split("/")[2]
+                source_name = parts[1]
                 if source_name not in orchestrator.connectors:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown connector"})
                     return
